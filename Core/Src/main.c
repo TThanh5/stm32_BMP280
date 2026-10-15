@@ -95,16 +95,39 @@ uint8_t BMP280_Init(void)
 {
   uint8_t chip_id = 0;
 
-  // Thử địa chỉ 0x77 trước (chuẩn Adafruit)
-  bmp280_i2c_addr = BMP280_ADDR_PRIMARY;
-  if (HAL_I2C_Mem_Read(&hi2c1, bmp280_i2c_addr, BMP280_REG_ID, 1, &chip_id, 1, 500) != HAL_OK || chip_id != 0x58)
+  // Quét thử trước 0x77 và 0x76
+  if (HAL_I2C_Mem_Read(&hi2c1, BMP280_ADDR_PRIMARY, BMP280_REG_ID, 1, &chip_id, 1, 200) == HAL_OK && chip_id == 0x58)
   {
-    // Nếu không thấy, thử tiếp địa chỉ 0x76
+    bmp280_i2c_addr = BMP280_ADDR_PRIMARY;
+  }
+  else if (HAL_I2C_Mem_Read(&hi2c1, BMP280_ADDR_SECONDARY, BMP280_REG_ID, 1, &chip_id, 1, 200) == HAL_OK && chip_id == 0x58)
+  {
     bmp280_i2c_addr = BMP280_ADDR_SECONDARY;
-    if (HAL_I2C_Mem_Read(&hi2c1, bmp280_i2c_addr, BMP280_REG_ID, 1, &chip_id, 1, 500) != HAL_OK || chip_id != 0x58)
+  }
+  else
+  {
+    // Quét toàn bộ bus I2C để chẩn đoán chính xác xem có thiết bị nào trên bus không
+    sprintf(msg, "-> Dang quet toan bo bus I2C1 (PB8/PB9)...\r\n");
+    HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+    uint8_t found = 0;
+    for (uint16_t addr = 1; addr < 128; addr++)
     {
-      return 0; // Không tìm thấy cảm biến ở cả 2 địa chỉ
+      if (HAL_I2C_IsDeviceReady(&hi2c1, (addr << 1), 1, 10) == HAL_OK)
+      {
+        uint8_t id_test = 0;
+        HAL_I2C_Mem_Read(&hi2c1, (addr << 1), BMP280_REG_ID, 1, &id_test, 1, 50);
+        sprintf(msg, "   [I2C FOUND] Phat hien thiet bi o dia chi: 0x%02X (Chip ID doc duoc: 0x%02X)\r\n", addr, id_test);
+        HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+        if (id_test == 0x58)
+        {
+          bmp280_i2c_addr = (addr << 1);
+          chip_id = id_test;
+          found = 1;
+          break;
+        }
+      }
     }
+    if (!found) return 0;
   }
 
   // Đọc 6 byte hệ số hiệu chuẩn nhiệt độ (dig_T1..T3) từ thanh ghi 0x88
@@ -118,9 +141,7 @@ uint8_t BMP280_Init(void)
   dig_T2 = (int16_t)((calib[3] << 8) | calib[2]);
   dig_T3 = (int16_t)((calib[5] << 8) | calib[4]);
 
-  // Cấu hình chế độ đo:
-  // osrs_t = 1 (Oversampling x1), osrs_p = 1 (Oversampling x1), mode = 3 (Normal mode)
-  // Giá trị ghi vào 0xF4: (1 << 5) | (1 << 2) | 3 = 0x27
+  // Cấu hình chế độ đo: Oversampling x1, Normal mode -> 0x27
   uint8_t ctrl_meas = 0x27;
   HAL_I2C_Mem_Write(&hi2c1, bmp280_i2c_addr, BMP280_REG_CTRL, 1, &ctrl_meas, 1, 1000);
 
@@ -252,14 +273,23 @@ int main(void)
       // Đóng gói giá trị float tempC (4 bytes) vào gói tin CAN
       memcpy(TxData, &tempC, sizeof(float));
 
+      // Kiểm tra mailbox trước khi gửi
+      // Nếu không có node nhận (chưa bật ESP32 hoặc chưa có trở 120R), mailbox sẽ bị kẹt vì không có ACK
+      uint32_t free_mb = HAL_CAN_GetTxMailboxesFreeLevel(&hcan1);
+      if (free_mb == 0)
+      {
+        // Giải phóng mailbox cũ để không bị nghẽn
+        HAL_CAN_AbortTxRequest(&hcan1, CAN_TX_MAILBOX0 | CAN_TX_MAILBOX1 | CAN_TX_MAILBOX2);
+      }
+
       // Gửi gói tin qua CAN1
       if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) == HAL_OK)
       {
-        sprintf(msg, " -> [CAN TX OK: ID 0x103]\r\n");
+        sprintf(msg, " -> [CAN TX QUEUED: ID 0x103]\r\n");
       }
       else
       {
-        sprintf(msg, " -> [CAN TX FAIL]\r\n");
+        sprintf(msg, " -> [CAN TX FAIL (Kiem tra ESP32/tro 120R)]\r\n");
       }
       HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
     }
