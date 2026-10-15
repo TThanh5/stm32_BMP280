@@ -18,9 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stm32f4xx_hal.h"
-#include "stm32f4xx_hal_def.h"
-#include "stm32f4xx_hal_uart.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -44,6 +41,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+CAN_HandleTypeDef hcan1;
+
 I2C_HandleTypeDef hi2c1;
 
 UART_HandleTypeDef huart3;
@@ -72,6 +71,11 @@ int16_t  dig_T3;
 int32_t  t_fine;
 
 char msg[128];
+
+// Các biến cấu hình truyền CAN
+CAN_TxHeaderTypeDef TxHeader;
+uint8_t             TxData[8];
+uint32_t            TxMailbox;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -80,6 +84,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_CAN1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -183,6 +188,7 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
   MX_I2C1_Init();
+  MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
   sprintf(msg, "\r\n========================================\r\n");
   HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
@@ -201,6 +207,26 @@ int main(void)
     sprintf(msg, "[ERROR] Khong tim thay BMP280!\r\nVui long kiem tra lai day noi I2C (PB8-SCL, PB9-SDA) va nguon.\r\n");
     HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
   }
+
+  // 1. Cấu hình gói tin CAN (TxHeader)
+  TxHeader.StdId = 0x103;              // ID gói tin CAN (ESP32 sẽ bắt đúng ID 0x103 này)
+  TxHeader.ExtId = 0x01;
+  TxHeader.RTR   = CAN_RTR_DATA;       // Gói tin chứa dữ liệu (Data Frame)
+  TxHeader.IDE   = CAN_ID_STD;         // Chuẩn ID tiêu chuẩn 11-bit
+  TxHeader.DLC   = 4;                  // Độ dài 4 byte (chứa 1 biến float 32-bit)
+  TxHeader.TransmitGlobalTime = DISABLE;
+
+  // 2. Bật khối CAN1 hoạt động
+  if (HAL_CAN_Start(&hcan1) == HAL_OK)
+  {
+    sprintf(msg, "[OK] CAN1 khoi dong thanh cong (Baud: 500 kbps, StdID: 0x103)!\r\n");
+    HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+  }
+  else
+  {
+    sprintf(msg, "[ERROR] Khong the start CAN1!\r\n");
+    HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -212,6 +238,7 @@ int main(void)
     if (tempC < -900.0f)
     {
       sprintf(msg, "[LOI] Khong doc duoc du lieu tu cam bien!\r\n");
+      HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
     }
     else
     {
@@ -219,10 +246,24 @@ int main(void)
       int t_dec = (int)((tempC - t_int) * 100);
       if (t_dec < 0) t_dec = -t_dec;
 
-      sprintf(msg, "Nhiet do hien tai (tempC): %d.%02d *C\r\n", t_int, t_dec);
+      sprintf(msg, "Nhiet do (tempC): %d.%02d *C", t_int, t_dec);
+      HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+      // Đóng gói giá trị float tempC (4 bytes) vào gói tin CAN
+      memcpy(TxData, &tempC, sizeof(float));
+
+      // Gửi gói tin qua CAN1
+      if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) == HAL_OK)
+      {
+        sprintf(msg, " -> [CAN TX OK: ID 0x103]\r\n");
+      }
+      else
+      {
+        sprintf(msg, " -> [CAN TX FAIL]\r\n");
+      }
+      HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
     }
 
-    HAL_UART_Transmit(&huart3, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
     HAL_Delay(1000);
     /* USER CODE END WHILE */
 
@@ -275,6 +316,44 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief CAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN1_Init(void)
+{
+
+  /* USER CODE BEGIN CAN1_Init 0 */
+
+  /* USER CODE END CAN1_Init 0 */
+
+  /* USER CODE BEGIN CAN1_Init 1 */
+
+  /* USER CODE END CAN1_Init 1 */
+  hcan1.Instance = CAN1;
+  // APB1 Clock = 42 MHz. Tốc độ CAN = 42MHz / (6 * (1 + 11 + 2)) = 500 kbps (Chuẩn tương thích ESP32)
+  hcan1.Init.Prescaler = 6;
+  hcan1.Init.Mode = CAN_MODE_NORMAL;
+  hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_11TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+  hcan1.Init.TimeTriggeredMode = DISABLE;
+  hcan1.Init.AutoBusOff = DISABLE;
+  hcan1.Init.AutoWakeUp = DISABLE;
+  hcan1.Init.AutoRetransmission = DISABLE;
+  hcan1.Init.ReceiveFifoLocked = DISABLE;
+  hcan1.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN1_Init 2 */
+
+  /* USER CODE END CAN1_Init 2 */
+
 }
 
 /**
